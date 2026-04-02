@@ -148,25 +148,75 @@ https请使用nginx等反代
 ## 手动安装被控
 
 ```bash
-wget --version||yum install wget -y||apt-get install wget -y
-/usr/bin/neko-status -v||(wget 被控下载地址 -O /usr/bin/neko-status && chmod +x /usr/bin/neko-status)
-systemctl stop nekonekostatus
-mkdir /etc/neko-status/
-echo "key: 通讯秘钥
-port: 通讯端口
-debug: false" > /etc/neko-status/config.yaml
-systemctl stop nekonekostatus
-echo "[Unit]
-Description=nekonekostatus
+#!/usr/bin/env bash
+set -e
+
+COMM_KEY="通讯密钥"
+COMM_PORT="通讯端口"
+
+PRIMARY_URL="https://github.com/anjing-liu/nekonekostatus/releases/download/Releases"
+BACKUP_URL="https://ghproxy.com/https://github.com/anjing-liu/nekonekostatus/releases/download/Releases"
+
+INSTALL_DIR="/usr/bin"
+CONFIG_DIR="/etc/neko-status"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+SERVICE_FILE="/etc/systemd/system/neko-status.service"
+
+ARCH=$(uname -m)
+
+case "$ARCH" in
+    x86_64) FILE="neko-status_linux_amd64" ;;
+    aarch64) FILE="neko-status_linux_arm64" ;;
+    armv7l) FILE="neko-status_linux_arm7" ;;
+    i386|i686) FILE="neko-status_linux_386" ;;
+    *) exit 1 ;;
+esac
+
+pkill -f neko-status >/dev/null 2>&1 || true
+
+download() {
+    local url=$1
+    wget --timeout=10 --tries=3 -q -O /tmp/neko-status.tmp "$url/$FILE" && \
+    mv -f /tmp/neko-status.tmp "$INSTALL_DIR/neko-status" && \
+    chmod +x "$INSTALL_DIR/neko-status" && return 0
+    return 1
+}
+
+download "$PRIMARY_URL" || download "$BACKUP_URL" || exit 1
+
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_FILE" <<EOF
+{
+  "key": "$COMM_KEY",
+  "port": $COMM_PORT
+}
+EOF
+
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=neko-status
+After=network.target
 
 [Service]
+Type=simple
+WorkingDirectory=$CONFIG_DIR
+ExecStart=$INSTALL_DIR/neko-status -c $CONFIG_FILE
 Restart=always
 RestartSec=5
-ExecStart=/usr/bin/neko-status -c /etc/neko-status/config.yaml
 
 [Install]
-WantedBy=multi-user.target" > /etc/systemd/system/nekonekostatus.service
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-systemctl start nekonekostatus
-systemctl enable nekonekostatus
+systemctl enable --now neko-status
+
+systemctl restart neko-status
+
+for i in {1..10}; do
+    systemctl is-active --quiet neko-status && break
+    sleep 1
+done
+
+systemctl is-active --quiet neko-status || exit 1
 ```
