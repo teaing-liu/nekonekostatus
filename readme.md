@@ -154,8 +154,12 @@ set -e
 COMM_KEY="通讯密钥"
 COMM_PORT="通讯端口"
 
-PRIMARY_URL="https://github.com/anjing-liu/nekonekostatus/releases/download/Releases"
-BACKUP_URL="https://ghproxy.com/https://github.com/anjing-liu/nekonekostatus/releases/download/Releases"
+REPO_API="https://api.github.com/repos/anjing-liu/nekonekostatus/releases/latest"
+VERSION=$(curl -s "$REPO_API" | grep '"tag_name"' | sed 's/.*: "\(.*\)".*/\1/')
+
+# 修改点2: 使用版本号构建正确的下载链接
+PRIMARY_URL="https://github.com/anjing-liu/nekonekostatus/releases/download/${VERSION}"
+BACKUP_URL="https://ghproxy.com/https://github.com/anjing-liu/nekonekostatus/releases/download/${VERSION}"
 
 INSTALL_DIR="/usr/bin"
 CONFIG_DIR="/etc/neko-status"
@@ -169,21 +173,40 @@ case "$ARCH" in
     aarch64) FILE="neko-status_linux_arm64" ;;
     armv7l) FILE="neko-status_linux_arm7" ;;
     i386|i686) FILE="neko-status_linux_386" ;;
-    *) exit 1 ;;
+    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
+
+echo "Detected architecture: $ARCH"
+echo "Downloading version: $VERSION"
+echo "File: $FILE"
 
 pkill -f neko-status >/dev/null 2>&1 || true
 
 download() {
     local url=$1
-    wget --timeout=10 --tries=3 -q -O /tmp/neko-status.tmp "$url/$FILE" && \
+    echo "Attempting to download from: $url/$FILE"
+    wget --timeout=10 --tries=3 -q --show-progress -O /tmp/neko-status.tmp "$url/$FILE" && \
     mv -f /tmp/neko-status.tmp "$INSTALL_DIR/neko-status" && \
-    chmod +x "$INSTALL_DIR/neko-status" && return 0
+    chmod +x "$INSTALL_DIR/neko-status" && \
+    echo "Download successful" && return 0
+    echo "Download failed from: $url"
     return 1
 }
 
-download "$PRIMARY_URL" || download "$BACKUP_URL" || exit 1
+# 先尝试主地址，失败后尝试备用地址
+download "$PRIMARY_URL" || download "$BACKUP_URL" || {
+    echo "ERROR: Failed to download from all sources"
+    exit 1
+}
 
+# 验证下载的文件是有效的二进制文件
+if ! file "$INSTALL_DIR/neko-status" | grep -q "ELF"; then
+    echo "ERROR: Downloaded file is not a valid executable"
+    file "$INSTALL_DIR/neko-status"
+    exit 1
+fi
+
+echo "Creating configuration..."
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_FILE" <<EOF
 {
@@ -192,6 +215,7 @@ cat > "$CONFIG_FILE" <<EOF
 }
 EOF
 
+echo "Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=neko-status
@@ -208,15 +232,33 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+echo "Starting service..."
 systemctl daemon-reload
 systemctl enable --now neko-status
 
-systemctl restart neko-status
-
+# 等待服务启动
 for i in {1..10}; do
-    systemctl is-active --quiet neko-status && break
+    if systemctl is-active --quiet neko-status; then
+        echo "Service is running"
+        break
+    fi
     sleep 1
 done
 
-systemctl is-active --quiet neko-status || exit 1
+# 最终检查
+if systemctl is-active --quiet neko-status; then
+    echo "✓ neko-status installed and running successfully"
+    echo "✓ Listening on port: $COMM_PORT"
+    echo "✓ Configuration: $CONFIG_FILE"
+    echo "✓ Service: $SERVICE_FILE"
+    
+    # 显示服务状态
+    echo ""
+    echo "Service status:"
+    systemctl status neko-status --no-pager -l
+else
+    echo "ERROR: Service failed to start"
+    journalctl -u neko-status -n 20 --no-pager
+    exit 1
+fi
 ```
